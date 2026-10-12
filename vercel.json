@@ -7,7 +7,7 @@
   ],
   "git": {
     "deploymentEnabled": {
-      "*": false,
+      "**": false,
       "live": true
     }
   }

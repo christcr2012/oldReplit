@@ -28,8 +28,7 @@ function git(args) {
   return execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
 
-export async function run() {
-  const policy = JSON.parse(readFileSync(new URL('./policy.json', import.meta.url), 'utf8'));
+export async function run(policy = JSON.parse(readFileSync(new URL('./policy.json', import.meta.url), 'utf8'))) {
   const repo = process.env.GITHUB_REPOSITORY;
   if (process.env.GITHUB_EVENT_NAME !== 'schedule' || process.env.GITHUB_REF !== 'refs/heads/main' ||
       repo !== policy.repository || !process.env.GH_TOKEN) throw Error('Scheduled owner main only');

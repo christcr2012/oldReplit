@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { checksPass, decide, denverDay } from './promote-live.mjs';
+import { checksPass, decide, denverDay, run } from './promote-live.mjs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 const main = 'a'.repeat(40), live = 'b'.repeat(40);
 const good = { id: 1, name: 'ci', head_sha: main, app: { slug: 'github-actions' },
   status: 'completed', conclusion: 'success' };
@@ -26,4 +30,42 @@ test('one checked fast-forward daily; reruns and unchanged heads skip', () => {
   assert.throws(() => decide({ ...state, ancestor: false }), /rewrite/);
   assert.throws(() => decide({ ...state, green: false }), /checks/);
   assert.throws(() => decide({ ...state, main: 'main' }), /identity/);
+});
+test('real atomic git promotion, read-back and second same-day update refusal', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'release-policy-'));
+  const cwd = process.cwd(), fetchBefore = globalThis.fetch;
+  const keys = ['GITHUB_REPOSITORY', 'GITHUB_REF', 'GITHUB_EVENT_NAME', 'GH_TOKEN'];
+  const before = keys.map(k => process.env[k]);
+  const git = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: 'pipe' }).trim();
+  try {
+    git('init', '--bare', join(dir, 'remote.git'));
+    git('init', '-b', 'main');
+    git('config', 'user.email', 'test@example.invalid');
+    git('config', 'user.name', 'Release test');
+    git('remote', 'add', 'origin', join(dir, 'remote.git'));
+    writeFileSync(join(dir, 'fixture.txt'), 'first');
+    git('add', 'fixture.txt'); git('commit', '-m', 'first');
+    git('push', 'origin', 'main', 'main:live');
+    writeFileSync(join(dir, 'fixture.txt'), 'second');
+    git('commit', '-am', 'second'); git('push', 'origin', 'main');
+    const checked = git('rev-parse', 'HEAD');
+    Object.assign(process.env, { GITHUB_REPOSITORY: 'example/repo', GITHUB_REF: 'refs/heads/main',
+      GITHUB_EVENT_NAME: 'schedule', GH_TOKEN: 'fixture' });
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ total_count: 1,
+      check_runs: [{ ...good, head_sha: checked }] }) });
+    process.chdir(dir);
+    await run({ repository: 'example/repo', requiredChecks: ['ci'] });
+    assert.equal(git('ls-remote', 'origin', 'refs/heads/live').split(/\s+/)[0], checked);
+    assert.equal(git('ls-remote', 'origin', 'refs/tags/live-promotion/' + denverDay()).split(/\s+/)[0], checked);
+    writeFileSync(join(dir, 'fixture.txt'), 'third');
+    git('commit', '-am', 'third'); git('push', 'origin', 'main');
+    await run({ repository: 'example/repo', requiredChecks: ['ci'] });
+    assert.equal(git('ls-remote', 'origin', 'refs/heads/live').split(/\s+/)[0], checked);
+    process.env.GITHUB_EVENT_NAME = 'workflow_dispatch';
+    await assert.rejects(run({ repository: 'example/repo', requiredChecks: ['ci'] }), /Scheduled/);
+  } finally {
+    process.chdir(cwd); globalThis.fetch = fetchBefore;
+    keys.forEach((key, i) => { if (before[i] === undefined) delete process.env[key]; else process.env[key] = before[i]; });
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
